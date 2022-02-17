@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.16.1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util"] }
+lexopt = "0.2.0"
