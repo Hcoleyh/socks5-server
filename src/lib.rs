@@ -1,5 +1,6 @@
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{copy_bidirectional, AsyncWriteExt, AsyncReadExt};
+use anyhow::Result;
 
 #[derive(Clone, Copy)]
 enum Method {
@@ -26,7 +27,7 @@ enum CommandRep {
     ServerError = 0x01,
     //RuleSetNotAllowed = 0x02,
     //NetworkUnreached = 0x03,
-    HostUnreached = 0x04,
+    //HostUnreached = 0x04,
     ConnectionRefused = 0x05,
     //TTLExpired = 0x06,
     CommandUnsupported = 0x07,
@@ -62,7 +63,7 @@ impl Connection {
         }
     }
 
-    async fn handle(&mut self) -> std::io::Result<()> {
+    async fn handle(&mut self) -> Result<()> {
         let method = self.negotiate_method().await?;
         self.reply_method(method).await?;
 
@@ -71,7 +72,7 @@ impl Connection {
         self.handle_command().await
     }
 
-    async fn handle_command(&mut self) -> std::io::Result<()> {
+    async fn handle_command(&mut self) -> Result<()> {
         use CommandRep::{ServerError, CommandUnsupported};
         let mut buf = [0u8; 3];
 
@@ -90,7 +91,7 @@ impl Connection {
         }
     }
 
-    async fn handle_connect_command(&mut self) -> std::io::Result<()> {
+    async fn handle_connect_command(&mut self) -> Result<()> {
         let addr = self.read_addr().await?;
 
         match TcpStream::connect(addr).await {
@@ -105,7 +106,7 @@ impl Connection {
         }
     }
 
-    async fn read_addr(&mut self) -> std::io::Result<std::net::SocketAddr> {
+    async fn read_addr(&mut self) -> Result<std::net::SocketAddr> {
         use std::net::SocketAddr;
 
         let addr_type: AddrType = self.stream.read_u8().await?.into();
@@ -132,32 +133,25 @@ impl Connection {
                 let port = self.stream.read_u16().await?;
 
                 use std::str::FromStr;
-                let addr;
-                match SocketAddr::from_str(&format!("{:?}:{}", domain.as_slice(), port)) {
-                    Err(_) => {
-                        self.reply_command(CommandRep::HostUnreached).await?;
-                        return Err(std::io::Error::new(std::io::ErrorKind::Other, ""));
-                    },
-                    Ok(a) => addr = a
-                }
-                Ok(addr)
+                Ok(SocketAddr::from_str(&format!("{:?}:{}", domain.as_slice(), port))?)
             }
             _ => {
                 self.reply_command(CommandRep::AddrTypeUnsupported).await?;
-                Err(std::io::Error::new(std::io::ErrorKind::Other, ""))
+                Err(anyhow::anyhow!("Unsupported Address Type"))
             }
         }
     }
 
-    async fn reply_command(&mut self, rep: CommandRep) -> std::io::Result<()> {
+    async fn reply_command(&mut self, rep: CommandRep) -> Result<()> {
         self.stream.write_u16(to_u16(self.version, rep as u8)).await?;
         self.stream.write_u16(AddrType::V4 as u16).await?;
         self.stream.write_u32(0u32).await?;
         self.stream.write_u16(0u16).await?;
-        self.stream.flush().await
+        self.stream.flush().await?;
+        Ok(())
     }
 
-    async fn negotiate_method(&mut self) -> std::io::Result<Method> {
+    async fn negotiate_method(&mut self) -> Result<Method> {
         let mut buf = [0u8; 255];
 
         self.stream.read_exact(&mut buf[..2]).await?;
@@ -174,9 +168,10 @@ impl Connection {
         Ok(Method::NOAUTH)
     }
 
-    async fn reply_method(&mut self, method: Method) -> std::io::Result<()> {
+    async fn reply_method(&mut self, method: Method) -> Result<()> {
         self.stream.write_u16(to_u16(self.version, method as u8)).await?;
-        self.stream.flush().await
+        self.stream.flush().await?;
+        Ok(())
     }
 
     async fn auth(&mut self, method: Method) {
