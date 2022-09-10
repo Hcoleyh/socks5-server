@@ -1,13 +1,13 @@
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{copy_bidirectional, AsyncWriteExt, AsyncReadExt};
 use anyhow::Result;
+use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Clone, Copy)]
 enum Method {
-    NOAUTH = 0x00,
+    Noauth = 0x00,
     //GSSAPI = 0x01,
     //PASSWD = 0x02,
-    ERROR  = 0xff
+    Error = 0xff,
 }
 
 struct Connection {
@@ -16,14 +16,14 @@ struct Connection {
 }
 
 enum Command {
-    CONNECT = 0x01,
+    Connect = 0x01,
     //BIND = 0x02,
     //UDP = 0x03,
     Unsupported = 0x04,
 }
 
 enum CommandRep {
-    SUCCEEDED = 0x00,
+    Succeeded = 0x00,
     ServerError = 0x01,
     //RuleSetNotAllowed = 0x02,
     //NetworkUnreached = 0x03,
@@ -55,11 +55,10 @@ pub async fn run(addr: &str) -> std::io::Result<()> {
 }
 
 impl Connection {
-
     pub fn new(stream: TcpStream) -> Self {
         Connection {
             stream,
-            version: 5u8
+            version: 5u8,
         }
     }
 
@@ -73,7 +72,7 @@ impl Connection {
     }
 
     async fn handle_command(&mut self) -> Result<()> {
-        use CommandRep::{ServerError, CommandUnsupported};
+        use CommandRep::{CommandUnsupported, ServerError};
         let mut buf = [0u8; 3];
 
         self.stream.read_exact(&mut buf).await?;
@@ -82,12 +81,8 @@ impl Connection {
         }
 
         match buf[1].into() {
-            Command::CONNECT => {
-                self.handle_connect_command().await
-            },
-            Command::Unsupported => {
-                self.reply_command(CommandUnsupported).await
-            },
+            Command::Connect => self.handle_connect_command().await,
+            Command::Unsupported => self.reply_command(CommandUnsupported).await,
         }
     }
 
@@ -95,14 +90,12 @@ impl Connection {
         let addr = self.read_addr().await?;
 
         match TcpStream::connect(addr).await {
-            Err(_) => {
-                self.reply_command(CommandRep::ConnectionRefused).await
-            },
+            Err(_) => self.reply_command(CommandRep::ConnectionRefused).await,
             Ok(mut connection) => {
-                self.reply_command(CommandRep::SUCCEEDED).await?;
+                self.reply_command(CommandRep::Succeeded).await?;
                 copy_bidirectional(&mut self.stream, &mut connection).await?;
                 Ok(())
-            },
+            }
         }
     }
 
@@ -118,22 +111,29 @@ impl Connection {
                 let port = self.stream.read_u16().await?;
 
                 Ok(SocketAddr::from((addr, port)))
-            },
+            }
             AddrType::V6 => {
                 let mut addr = [0u8; 16];
                 self.stream.read_exact(&mut addr).await?;
                 let port = self.stream.read_u16().await?;
 
                 Ok(SocketAddr::from((addr, port)))
-            },
+            }
             AddrType::Domain => {
-                let len = self.stream.read_u8().await?;
-                let mut domain = Vec::with_capacity(len as usize);
+                let len = match self.stream.read_u8().await? {
+                    0 => return Err(anyhow::anyhow!("error domain lens")),
+                    n => n,
+                };
+                let mut domain = vec![0; len as usize];
                 self.stream.read_exact(&mut domain).await?;
                 let port = self.stream.read_u16().await?;
 
                 use std::str::FromStr;
-                Ok(SocketAddr::from_str(&format!("{:?}:{}", domain.as_slice(), port))?)
+                Ok(SocketAddr::from_str(&format!(
+                    "{:?}:{}",
+                    domain.as_slice(),
+                    port
+                ))?)
             }
             _ => {
                 self.reply_command(CommandRep::AddrTypeUnsupported).await?;
@@ -143,7 +143,9 @@ impl Connection {
     }
 
     async fn reply_command(&mut self, rep: CommandRep) -> Result<()> {
-        self.stream.write_u16(to_u16(self.version, rep as u8)).await?;
+        self.stream
+            .write_u16(to_u16(self.version, rep as u8))
+            .await?;
         self.stream.write_u16(AddrType::V4 as u16).await?;
         self.stream.write_u32(0u32).await?;
         self.stream.write_u16(0u16).await?;
@@ -156,44 +158,45 @@ impl Connection {
 
         self.stream.read_exact(&mut buf[..2]).await?;
         if buf[0] != self.version {
-            return Ok(Method::ERROR);
+            return Ok(Method::Error);
         }
 
         let n_methods = buf[1] as usize;
         self.stream.read_exact(&mut buf[..n_methods]).await?;
-        if !buf[..n_methods].contains(&(Method::NOAUTH as u8)) {
-            return Ok(Method::ERROR);
+        if !buf[..n_methods].contains(&(Method::Noauth as u8)) {
+            return Ok(Method::Error);
         }
 
-        Ok(Method::NOAUTH)
+        Ok(Method::Noauth)
     }
 
     async fn reply_method(&mut self, method: Method) -> Result<()> {
-        self.stream.write_u16(to_u16(self.version, method as u8)).await?;
+        self.stream
+            .write_u16(to_u16(self.version, method as u8))
+            .await?;
         self.stream.flush().await?;
         Ok(())
     }
 
     async fn auth(&mut self, method: Method) {
         match method {
-            Method::NOAUTH => (),
+            Method::Noauth => (),
             _ => (),
         }
     }
-
 }
 
 impl From<u8> for Command {
     fn from(c: u8) -> Self {
         match c {
-            1u8 => Command::CONNECT,
-            _ => Command::Unsupported
+            1u8 => Command::Connect,
+            _ => Command::Unsupported,
         }
     }
 }
 
 impl From<u8> for AddrType {
-    fn from (t: u8) -> Self {
+    fn from(t: u8) -> Self {
         match t {
             1u8 => AddrType::V4,
             3u8 => AddrType::Domain,

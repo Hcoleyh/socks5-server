@@ -1,10 +1,7 @@
-use tokio;
-
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     match parse_args() {
-        Ok((addr, port)) => 
-            socks5_server::run(&format!("{}:{}", addr, port)).await,
+        Ok((addr, port)) => socks5_server::run(&format!("{}:{}", addr, port)).await,
         _ => {
             help();
             Ok(())
@@ -23,12 +20,12 @@ fn parse_args() -> Result<(String, String), lexopt::Error> {
         match arg {
             Short('b') => {
                 addr = parser.value()?.into_string()?;
-            },
+            }
             Short('p') => {
                 port = parser.value()?.into_string()?;
-            },
+            }
             Long("help") => help(),
-            _ => help()
+            _ => help(),
         }
     }
 
