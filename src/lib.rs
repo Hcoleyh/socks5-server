@@ -6,8 +6,12 @@ use tokio::net::{TcpListener, TcpStream};
 enum Method {
     Noauth = 0x00,
     //GSSAPI = 0x01,
-    //PASSWD = 0x02,
+    Passwd = 0x02,
     Error = 0xff,
+}
+
+enum AuthMethod {
+    Passwd = 0x01,
 }
 
 struct Connection {
@@ -24,8 +28,8 @@ enum Command {
 
 enum CommandRep {
     Succeeded = 0x00,
-    ServerError = 0x01,
-    //RuleSetNotAllowed = 0x02,
+    //ServerError = 0x01,
+    RuleSetNotAllowed = 0x02,
     //NetworkUnreached = 0x03,
     //HostUnreached = 0x04,
     ConnectionRefused = 0x05,
@@ -41,6 +45,12 @@ enum AddrType {
     Unsupported = 0x05,
 }
 
+enum Stage {
+    Method,
+    Auth,
+    Command,
+}
+
 pub async fn run(addr: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
@@ -49,7 +59,13 @@ pub async fn run(addr: &str) -> std::io::Result<()> {
 
         tokio::spawn(async move {
             let mut connection = Connection::new(stream);
-            let _ = connection.handle().await;
+            match connection.handle().await {
+                Err(e) => match e.downcast::<anyhow::Error>() {
+                    Err(_) => (),
+                    _ => (),
+                },
+                _ => (),
+            };
         });
     }
 }
@@ -66,23 +82,23 @@ impl Connection {
         let method = self.negotiate_method().await?;
         self.reply_method(method).await?;
 
-        self.auth(method).await;
+        self.auth(method).await?;
 
         self.handle_command().await
     }
 
     async fn handle_command(&mut self) -> Result<()> {
-        use CommandRep::{CommandUnsupported, ServerError};
+        use CommandRep::{CommandUnsupported, RuleSetNotAllowed};
         let mut buf = [0u8; 3];
 
         self.stream.read_exact(&mut buf).await?;
         if buf[0] != self.version {
-            return self.reply_command(ServerError).await;
+            return self.reply_command(RuleSetNotAllowed).await;
         }
 
         match buf[1].into() {
             Command::Connect => self.handle_connect_command().await,
-            Command::Unsupported => self.reply_command(CommandUnsupported).await,
+            _ => self.reply_command(CommandUnsupported).await,
         }
     }
 
@@ -120,12 +136,7 @@ impl Connection {
                 Ok(SocketAddr::from((addr, port)))
             }
             AddrType::Domain => {
-                let len = match self.stream.read_u8().await? {
-                    0 => return Err(anyhow::anyhow!("error domain lens")),
-                    n => n,
-                };
-                let mut domain = vec![0; len as usize];
-                self.stream.read_exact(&mut domain).await?;
+                let domain = self.read_variable(Stage::Command).await?;
                 let port = self.stream.read_u16().await?;
 
                 use std::str::FromStr;
@@ -137,37 +148,68 @@ impl Connection {
             }
             _ => {
                 self.reply_command(CommandRep::AddrTypeUnsupported).await?;
-                Err(anyhow::anyhow!("Unsupported Address Type"))
+                anyhow::bail!("Unsupported address type")
             }
         }
     }
 
+    async fn read_variable(&mut self, stage: Stage) -> Result<Vec<u8>> {
+        let len = match self.stream.read_u8().await? {
+            0 => {
+                match stage {
+                    Stage::Command => self.reply_command(CommandRep::RuleSetNotAllowed).await?,
+                    Stage::Method => self.reply_method(Method::Error).await?,
+                    Stage::Auth => self.reply_auth(AuthMethod::Passwd, false).await?,
+                }
+                anyhow::bail!("Error lens of variable field")
+            }
+            n => n,
+        } as usize;
+
+        let mut buf = vec![0; len];
+        self.stream.read_exact(&mut buf).await?;
+
+        Ok(buf)
+    }
+
     async fn reply_command(&mut self, rep: CommandRep) -> Result<()> {
-        self.stream
-            .write_u16(to_u16(self.version, rep as u8))
-            .await?;
-        self.stream.write_u16(AddrType::V4 as u16).await?;
-        self.stream.write_u32(0u32).await?;
-        self.stream.write_u16(0u16).await?;
+        let buf = vec![
+            self.version,
+            rep as u8,
+            0,
+            AddrType::V4 as u8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        self.stream.write_all(&buf).await?;
+        //self.stream
+        //    .write_u16(to_u16(self.version, rep as u8))
+        //    .await?;
+        //self.stream.write_u16(AddrType::V4 as u16).await?;
+        //self.stream.write_u32(0u32).await?;
+        //self.stream.write_u16(0u16).await?;
         self.stream.flush().await?;
         Ok(())
     }
 
     async fn negotiate_method(&mut self) -> Result<Method> {
-        let mut buf = [0u8; 255];
-
-        self.stream.read_exact(&mut buf[..2]).await?;
-        if buf[0] != self.version {
+        if self.stream.read_u8().await? != self.version {
             return Ok(Method::Error);
         }
 
-        let n_methods = buf[1] as usize;
-        self.stream.read_exact(&mut buf[..n_methods]).await?;
-        if !buf[..n_methods].contains(&(Method::Noauth as u8)) {
-            return Ok(Method::Error);
+        let buf = self.read_variable(Stage::Method).await?;
+        if buf.contains(&(Method::Passwd as u8)) {
+            return Ok(Method::Passwd);
+        }
+        if buf.contains(&(Method::Noauth as u8)) {
+            return Ok(Method::Noauth);
         }
 
-        Ok(Method::Noauth)
+        Ok(Method::Error)
     }
 
     async fn reply_method(&mut self, method: Method) -> Result<()> {
@@ -175,14 +217,41 @@ impl Connection {
             .write_u16(to_u16(self.version, method as u8))
             .await?;
         self.stream.flush().await?;
+
+        match method {
+            Method::Error => anyhow::bail!("Error method"),
+            _ => Ok(()),
+        }
+    }
+
+    async fn auth(&mut self, method: Method) -> Result<()> {
+        match method {
+            Method::Noauth => Ok(()),
+            Method::Passwd => self.auth_passwd().await,
+            _ => unreachable!(),
+        }
+    }
+
+    async fn reply_auth(&mut self, method: AuthMethod, rep: bool) -> Result<()> {
+        self.stream
+            .write_u16(to_u16(method as u8, !rep as u8))
+            .await?;
+        self.stream.flush().await?;
         Ok(())
     }
 
-    async fn auth(&mut self, method: Method) {
-        match method {
-            Method::Noauth => (),
-            _ => (),
+    async fn auth_passwd(&mut self) -> Result<()> {
+        self.stream.read_u8().await?;
+        let username = self.read_variable(Stage::Auth).await?;
+        let password = self.read_variable(Stage::Auth).await?;
+
+        let simple = vec![49, 50, 51];
+        if username != simple || password != simple {
+            self.reply_auth(AuthMethod::Passwd, false).await?;
+            anyhow::bail!("Auth failed");
         }
+
+        self.reply_auth(AuthMethod::Passwd, true).await
     }
 }
 
