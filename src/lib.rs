@@ -139,12 +139,11 @@ impl Connection {
                 let domain = self.read_variable(Stage::Command).await?;
                 let port = self.stream.read_u16().await?;
 
-                use std::str::FromStr;
-                Ok(SocketAddr::from_str(&format!(
-                    "{:?}:{}",
-                    domain.as_slice(),
-                    port
-                ))?)
+                use std::net::ToSocketAddrs;
+                (std::str::from_utf8(&domain)?, port)
+                    .to_socket_addrs()?
+                    .next()
+                    .ok_or(anyhow::anyhow!(""))
             }
             _ => {
                 self.reply_command(CommandRep::AddrTypeUnsupported).await?;
