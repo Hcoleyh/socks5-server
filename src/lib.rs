@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Clone, Copy)]
@@ -15,7 +15,7 @@ enum AuthMethod {
 }
 
 struct Connection {
-    stream: TcpStream,
+    stream: BufStream<TcpStream>,
     version: u8,
 }
 
@@ -73,7 +73,7 @@ pub async fn run(addr: &str) -> std::io::Result<()> {
 impl Connection {
     pub fn new(stream: TcpStream) -> Self {
         Connection {
-            stream,
+            stream: BufStream::with_capacity(513, 261, stream),
             version: 5u8,
         }
     }
@@ -185,12 +185,6 @@ impl Connection {
             0,
         ];
         self.stream.write_all(&buf).await?;
-        //self.stream
-        //    .write_u16(to_u16(self.version, rep as u8))
-        //    .await?;
-        //self.stream.write_u16(AddrType::V4 as u16).await?;
-        //self.stream.write_u32(0u32).await?;
-        //self.stream.write_u16(0u16).await?;
         self.stream.flush().await?;
         Ok(())
     }
