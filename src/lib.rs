@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::{error, info};
 use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -52,20 +53,18 @@ enum Stage {
 }
 
 pub async fn run(addr: &str) -> std::io::Result<()> {
+    env_logger::init();
+
     let listener = TcpListener::bind(addr).await?;
+    info!("Server bind to {}", addr);
 
     loop {
         let (stream, _) = listener.accept().await?;
+        info!("{}: New connection", stream.peer_addr()?);
 
         tokio::spawn(async move {
             let mut connection = Connection::new(stream);
-            match connection.handle().await {
-                Err(e) => match e.downcast::<anyhow::Error>() {
-                    Err(_) => (),
-                    _ => (),
-                },
-                _ => (),
-            };
+            let _ = connection.handle().await;
         });
     }
 }
@@ -79,12 +78,37 @@ impl Connection {
     }
 
     async fn handle(&mut self) -> Result<()> {
-        let method = self.negotiate_method().await?;
-        self.reply_method(method).await?;
+        let peer_addr = self.stream.get_ref().peer_addr().map_err(|e| {
+            error!("{}", e);
+            e
+        })?;
 
-        self.auth(method).await?;
+        let err = |e: &_| {
+            error!("{}: {}", peer_addr, e);
+            info!("{}: {}", peer_addr, "Close connection");
+        };
 
-        self.handle_command().await
+        let method = self.negotiate_method().await.map_err(|e| {
+            err(&e);
+            e
+        })?;
+        self.reply_method(method).await.map_err(|e| {
+            err(&e);
+            e
+        })?;
+
+        self.auth(method).await.map_err(|e| {
+            err(&e);
+            e
+        })?;
+
+        self.handle_command().await.map_err(|e| {
+            err(&e);
+            e
+        })?;
+
+        info!("{}: {}", peer_addr, "Close connection");
+        Ok(())
     }
 
     async fn handle_command(&mut self) -> Result<()> {
